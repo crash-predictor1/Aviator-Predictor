@@ -151,4 +151,239 @@ function roundSHA512(block: number[], H: Int_64[]): Int_64[] {
   const W: Int_64[] = new Array(80);
 
   a = H[0];
-  b =
+  b = H[1];
+  c = H[2];
+  d = H[3];
+  e = H[4];
+  f = H[5];
+  g = H[6];
+  h = H[7];
+
+  for (t = 0; t < 80; t += 1) {
+    if (t < 16) {
+      offset = t * 2;
+      W[t] = new Int_64(block[offset], block[offset + 1]);
+    } else {
+      W[t] = safeAdd_64_4(gamma1_64(W[t - 2]), W[t - 7], gamma0_64(W[t - 15]), W[t - 16]);
+    }
+    T1 = safeAdd_64_5(h, sigma1_64(e), ch_64(e, f, g), K_sha512[t], W[t]);
+    T2 = safeAdd_64_2(sigma0_64(a), maj_64(a, b, c));
+    h = g;
+    g = f;
+    f = e;
+    e = safeAdd_64_2(d, T1);
+    d = c;
+    c = b;
+    b = a;
+    a = safeAdd_64_2(T1, T2);
+  }
+
+  H[0] = safeAdd_64_2(a, H[0]);
+  H[1] = safeAdd_64_2(b, H[1]);
+  H[2] = safeAdd_64_2(c, H[2]);
+  H[3] = safeAdd_64_2(d, H[3]);
+  H[4] = safeAdd_64_2(e, H[4]);
+  H[5] = safeAdd_64_2(f, H[5]);
+  H[6] = safeAdd_64_2(g, H[6]);
+  H[7] = safeAdd_64_2(h, H[7]);
+
+  return H;
+}
+
+/**
+ * Finalizes the SHA-512 hash. This clobbers `remainder` and `H`.
+ *
+ * @param remainder Any leftover unprocessed packed ints that still need to be processed.
+ * @param remainderBinLen The number of bits in `remainder`.
+ * @param processedBinLen The number of bits already processed.
+ * @param H The intermediate H values from a previous round.
+ * @param variant The desired SHA-512 variant.
+ * @returns The array of integers representing the SHA-512 hash of message.
+ */
+function finalizeSHA512(
+  remainder: number[],
+  remainderBinLen: number,
+  processedBinLen: number,
+  H: Int_64[],
+  variant: VariantType
+): number[] {
+  let i, retVal;
+
+  /* The 129 addition is a hack but it works.  The correct number is
+    actually 136 (128 + 8) but the below math fails if
+    remainderBinLen + 136 % 1024 = 0. Since remainderBinLen % 8 = 0,
+    "shorting" the addition is OK. */
+  const offset = (((remainderBinLen + 129) >>> 10) << 5) + 31,
+    binaryStringInc = 32,
+    totalLen = remainderBinLen + processedBinLen;
+
+  while (remainder.length <= offset) {
+    remainder.push(0);
+  }
+  /* Append '1' at the end of the binary string */
+  remainder[remainderBinLen >>> 5] |= 0x80 << (24 - (remainderBinLen % 32));
+  /* Append length of binary string in the position such that the new
+   * length is correct. JavaScript numbers are limited to 2^53 so it's
+   * "safe" to treat the totalLen as a 64-bit integer. */
+
+  remainder[offset] = totalLen & 0xffffffff;
+  /* Bitwise operators treat the operand as a 32-bit number so need to
+   * use hacky division and round to get access to upper 32-ish bits */
+  remainder[offset - 1] = (totalLen / TWO_PWR_32) | 0;
+
+  /* This will always be at least 1 full chunk */
+  for (i = 0; i < remainder.length; i += binaryStringInc) {
+    // Avoid allocating with slice() when possible by using subarray if available.
+    const block = (remainder as any).subarray
+      ? (remainder as any).subarray(i, i + binaryStringInc)
+      : remainder.slice(i, i + binaryStringInc);
+    H = roundSHA512(block as any, H);
+  }
+
+  if ("SHA-384" === variant) {
+    H = (H as unknown) as Int_64[];
+    retVal = [
+      H[0].highOrder,
+      H[0].lowOrder,
+      H[1].highOrder,
+      H[1].lowOrder,
+      H[2].highOrder,
+      H[2].lowOrder,
+      H[3].highOrder,
+      H[3].lowOrder,
+      H[4].highOrder,
+      H[4].lowOrder,
+      H[5].highOrder,
+      H[5].lowOrder,
+    ];
+  } else {
+    /* SHA-512 */
+    retVal = [
+      H[0].highOrder,
+      H[0].lowOrder,
+      H[1].highOrder,
+      H[1].lowOrder,
+      H[2].highOrder,
+      H[2].lowOrder,
+      H[3].highOrder,
+      H[3].lowOrder,
+      H[4].highOrder,
+      H[4].lowOrder,
+      H[5].highOrder,
+      H[5].lowOrder,
+      H[6].highOrder,
+      H[6].lowOrder,
+      H[7].highOrder,
+      H[7].lowOrder,
+    ];
+  }
+  return retVal;
+}
+
+export default class jsSHA extends jsSHABase<Int_64[], VariantType> {
+  intermediateState: Int_64[];
+  variantBlockSize: number;
+  bigEndianMod: -1 | 1;
+  outputBinLen: number;
+  isVariableLen: boolean;
+  HMACSupported: boolean;
+
+  /* Added property: maximum allowed input bits (protects from accidental huge inputs) */
+  maxInputBits: number;
+
+  /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+  converterFunc: (input: any, existingBin: number[], existingBinLen: number) => packedValue;
+  roundFunc: (block: number[], H: Int_64[]) => Int_64[];
+  finalizeFunc: (remainder: number[], remainderBinLen: number, processedBinLen: number, H: Int_64[]) => number[];
+  stateCloneFunc: (state: Int_64[]) => Int_64[];
+  newStateFunc: (variant: VariantType) => Int_64[];
+  getMAC: () => number[];
+
+  constructor(variant: VariantType, inputFormat: "TEXT", options?: FixedLengthOptionsEncodingType);
+  constructor(variant: VariantType, inputFormat: FormatNoTextType, options?: FixedLengthOptionsNoEncodingType);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  constructor(variant: any, inputFormat: any, options?: any) {
+    if (!("SHA-384" === variant || "SHA-512" === variant)) {
+      throw new Error(sha_variant_error);
+    }
+    super(variant, inputFormat, options);
+    const resolvedOptions = options || {};
+
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    this.getMAC = this._getHMAC;
+    this.HMACSupported = true;
+    this.bigEndianMod = -1;
+    this.converterFunc = getStrConverter(this.inputFormat, this.utfType, this.bigEndianMod);
+    this.roundFunc = roundSHA512;
+    this.stateCloneFunc = function (state): Int_64[] {
+      return state.slice();
+    };
+    this.newStateFunc = getNewState512;
+    this.finalizeFunc = function (remainder, remainderBinLen, processedBinLen, H): number[] {
+      return finalizeSHA512(remainder, remainderBinLen, processedBinLen, H, variant);
+    };
+
+    this.intermediateState = getNewState512(variant);
+    this.variantBlockSize = 1024;
+    this.outputBinLen = "SHA-384" === variant ? 384 : 512;
+    this.isVariableLen = false;
+
+    // Default max input size (in bits). Adjust or override per instance if you like.
+    // This default protects from extremely large inputs that could hang a browser/Node process.
+    this.maxInputBits = resolvedOptions.maxInputBits || (2 ** 32) * 32; // ~128 GiB in bits
+
+    if (resolvedOptions["hmacKey"]) {
+      this._setHMACKey(parseInputOption("hmacKey", resolvedOptions["hmacKey"], this.bigEndianMod));
+    }
+  }
+
+  /**
+   * Override update to add input-size protection while delegating actual work to the base.
+   * This does a cheap conversion check first (same converter used by base), then calls super.update.
+   */
+  update(src: string | ArrayBuffer | Uint8Array): this {
+    // Determine the bit-length of the incoming chunk without modifying internal state
+    const converted = this.converterFunc(src, [], 0);
+    const chunkBinLen = converted.binLen;
+
+    if (this.processedLen + chunkBinLen > this.maxInputBits) {
+      throw new Error("Input too large");
+    }
+
+    // Delegate the actual update logic to the base implementation
+    return super.update(src);
+  }
+
+  /**
+   * Returns the raw binary state as a full HEX string.
+   * Useful for debugging or exposing intermediate state.
+   */
+  toHexArray(H: Int_64[]): string {
+    return H
+      .map(
+        (w) =>
+          (w.highOrder >>> 0).toString(16).padStart(8, "0") +
+          (w.lowOrder >>> 0).toString(16).padStart(8, "0")
+      )
+      .join("");
+  }
+  // (Everything else - methods wired up from constructor are unchanged in behavior.)
+  // The class relies on jsSHABase for most public methods (getHash, setHMACKey, getHMAC, etc.).
+}
+
+/**
+ * Built-in self-test (NIST test vector for "abc").
+ * Returns true if implementation matches expected SHA-512 result.
+ */
+export function sha512SelfTest(): boolean {
+  // Known SHA-512("abc") from NIST
+  const expected =
+    "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a" +
+    "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f";
+
+  // Use the exported class to compute
+  const shaObj = new jsSHA("SHA-512", "TEXT");
+  shaObj.update("abc");
+  const hash = shaObj.getHash("HEX");
+  return hash.toLowerCase() === expected;
+}

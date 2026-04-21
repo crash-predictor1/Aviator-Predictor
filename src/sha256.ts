@@ -20,12 +20,7 @@ import {
 
 type VariantType = "SHA-224" | "SHA-256";
 
-/**
- * Gets the state values for the specified SHA variant.
- *
- * @param variant: The SHA-256 family variant.
- * @returns The initial state values.
- */
+
 function getNewState256(variant: VariantType): number[] {
   let retVal;
 
@@ -58,6 +53,7 @@ function roundSHA256(block: number[], H: number[]): number[] {
   f = H[5];
   g = H[6];
   h = H[7];
+  i = H[8];
 
   for (t = 0; t < 64; t += 1) {
     if (t < 16) {
